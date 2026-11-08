@@ -40,8 +40,8 @@ from game import Action, AgentConfig, HandResult, Observation, Street
 warmup()
 
 # rename as your team/bot's name
-PARTICIPANT = "YourTeamName"
-AGENT_NAME = "EVBot"
+PARTICIPANT = "Lussian"
+AGENT_NAME = "Lussian_bot"
 
 # Our strategy lives in the bot/ folder. Importing it loads the preflop table
 # and warms up numpy now, during server start, not during our first decision.
