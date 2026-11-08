@@ -23,6 +23,7 @@ need to change it, and if you break it the judge can't talk to your bot.
 """
 
 import os
+import time
 import traceback
 
 import uvicorn
@@ -39,72 +40,62 @@ from game import Action, AgentConfig, HandResult, Observation, Street
 warmup()
 
 # rename as your team/bot's name
-PARTICIPANT = "TotallyAwesomeDatathonParticipant"
-AGENT_NAME = "JustAsAwesomeAgent"
+PARTICIPANT = "YourTeamName"
+AGENT_NAME = "EVBot"
+
+# Our strategy lives in the bot/ folder. Importing it loads the preflop table
+# and warms up numpy now, during server start, not during our first decision.
+from bot import strategy  # noqa: E402
+strategy.warmup()
 
 
 # ===== YOUR CODE HERE =====
 
 def new_half(config: AgentConfig, memory: dict) -> None:
-    """Called at the start of each half-match (1000 hands).
-
-    `memory` is a fresh, empty dict every half. Store anything you want to
-    remember between hands in it, e.g. memory["opp_raises"] = 0.
-    `config` holds the match settings (starting_stack, big_blind, ...).
-
-    In the tournament, each half runs in a brand-new copy of your server,
-    so nothing you learn in one half carries over to the other half.
-    """
-    memory["hands_played"] = 0
+    """Fresh opponent stats and time budget every half."""
+    try:
+        strategy.new_half(memory)
+    except Exception:
+        memory.clear()          # choose_action will notice and play safe
 
 
 def choose_action(obs: Observation, memory: dict) -> Action:
-    """Called every time it is your turn. Return one of obs.legal_actions.
+    """Never let an exception or an illegal action reach the judge:
+    5 errors in a half loses the whole match."""
+    start = time.perf_counter()
+    try:
+        return _choose(obs, memory)
+    finally:
+        # Count ALL our time (not just the simulation) against our own budget.
+        memory["used"] = memory.get("used", 0.0) + time.perf_counter() - start
 
-    What you can see in obs:
-        hand_index          which hand of the half this is (0, 1, 2, ...)
-        street              Street.PREFLOP, Street.FLOP, Street.TURN or Street.RIVER
-        hole_cards          your 5 cards as ints, sorted ascending (0-35)
-        board               board (community) cards seen so far (0, 3, 4 or 5 ints)
-        pot                 total chips both players put in this hand
-        to_call             chips you must add to match the opponent
-        my_bet, opp_bet     chips you,opponent put in on THIS street
-        my_stack, opp_stack chips each player still has behind
-        is_button           True if you are the button (small blind)
-        legal_actions       the Actions you may return right now
-        raise_to            {RAISE_HALF: total, RAISE_POT: total} for legal raises
-        min_raise_to        smallest normal raise total (all-ins may be lower)
-        raises_this_street  raises so far this street (max 4)
-        action_history      this hand's actions so far; each has
-                            street, is_me, action, amount, street_total
-        big_blind           size of the big blind in chips
 
-    Actions: Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT
-    Cards are ints: card_rank(c) is 0 (six) .. 8 (ace), card_suit(c) is 0..3,
-    and cards_to_str(obs.hole_cards) prints them like "6h 7c 9s Kd Ah".
-    Once all 5 board cards are out, omaha_score(obs.hole_cards, obs.board)
-    scores your hand (higher is better).
-    """
-
-    # Simple example of a heuristic bot, which just checks when it is of no cost, otherwise folds
-    # Replace this with your strategy!
-    if obs.to_call == 0:
+def _choose(obs: Observation, memory: dict) -> Action:
+    try:
+        if "opp" not in memory:
+            strategy.new_half(memory)
+        action = strategy.decide(obs, memory)
+        if action in obs.legal_actions:
+            return action
+        memory["fallbacks"] = memory.get("fallbacks", 0) + 1
+    except Exception:
+        # Counted so we can spot hidden bugs when testing locally.
+        memory["fallbacks"] = memory.get("fallbacks", 0) + 1
+    # Safe fallback: check if free, call only if cheap, otherwise fold.
+    if obs.to_call == 0 or obs.to_call * 4 <= obs.pot or Action.FOLD not in obs.legal_actions:
         return Action.CHECK_CALL
     return Action.FOLD
 
 
 def on_hand_end(result: HandResult, memory: dict) -> None:
-    """Called once for every finished hand. Optional: learn from what happened.
-
-    To save time, the judge sends finished hands along with your next
-    decision request, so this always runs BEFORE choose_action() sees the
-    next hand. (The last hands of a half arrive at the end of the half.)
-
-    result has: hand_index, my_net (chips won or lost), pot,
-    went_to_showdown, board (cards revealed), opp_hole (opponent's cards,
-    only after a showdown, else None), winner ('me', 'opp' or 'split').
-    """
-    memory["hands_played"] += 1
+    """Learn the opponent's final action (fold or call), which history never shows us."""
+    start = time.perf_counter()
+    try:
+        if "opp" in memory:
+            strategy.hand_over(result, memory)
+    except Exception:
+        memory["fallbacks"] = memory.get("fallbacks", 0) + 1
+    memory["used"] = memory.get("used", 0.0) + time.perf_counter() - start
 
 # ===== END OF YOUR CODE =====
 
